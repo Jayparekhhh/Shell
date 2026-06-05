@@ -221,5 +221,5 @@ void execute_arg(char* cmd, char* args[]) {
     execvp(cmd, args);
     printf("%s cmd not found\n", cmd);
     exit(1);
-}x
+}
 #endif //HELPERS_H
