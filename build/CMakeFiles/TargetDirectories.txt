@@ -1,3 +1,0 @@
-/home/jay/shell/build/CMakeFiles/shell.dir
-/home/jay/shell/build/CMakeFiles/edit_cache.dir
-/home/jay/shell/build/CMakeFiles/rebuild_cache.dir

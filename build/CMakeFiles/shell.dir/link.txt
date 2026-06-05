@@ -1,1 +1,0 @@
-/usr/bin/cc CMakeFiles/shell.dir/src/main.c.o -o shell  -lreadline 
