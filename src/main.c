@@ -4,29 +4,29 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#include "helpers.h"
 #include <stdbool.h>
 #include <fcntl.h>
-void trim(char *str);
-void trim_sted(char *str);
-int find_in_path(const char *cmd);
-int find_in_path_without_printing(const char *cmd);
-void execute_arg(char* cmd, char* args[]);
-bool is_builtin_command(const char *command);
-void parse_input(char *input, char **args);
-void builtin_echo(char* args[]);
-void builtin_pwd();
-void builtin_execute_executable(char* cmd, char* args[]);
-void builtin_type(char* args[]);
-void builtin_cd(char* args[]);
+#include "helpers.h"
 
 int main(int argc, char *argv[]) {
     setbuf(stdout, NULL);
-    int job_id = 0;
     char *args[50];
+    
+    for (int i = 0; i < MAX_JOBS; i++) {
+        jobs_list[i].active = false;
+    }
+
     for (int i = 0; i < 50; i++) args[i] = NULL;
     while (1) {
-        while (waitpid(-1, NULL, WNOHANG) > 0);
+        pid_t wpid;
+        while ((wpid = waitpid(-1, NULL, WNOHANG)) > 0) {
+            for (int j = 0; j < MAX_JOBS; j++) {
+                if (jobs_list[j].active && jobs_list[j].pid == wpid) {
+                    jobs_list[j].active = false; 
+                    break;
+                }
+            }
+        }
 
         for (int i = 0; i < 50; i++) {
             if (args[i] != NULL) {
@@ -42,9 +42,12 @@ int main(int argc, char *argv[]) {
             break;
         }
 
-        trim(input); //remove front whitespace
-
+        trim(input); 
         input[strcspn(input, "\n")] = '\0';
+        
+        char cmd_copy[1000];
+        strcpy(cmd_copy, input);
+
         bool background = false;
         parse_input(input, args);
 
@@ -53,11 +56,111 @@ int main(int argc, char *argv[]) {
                 free(args[i]);
                 args[i] = NULL;
                 background = true;
+                
+                char *amp_pos = strrchr(cmd_copy, '&');
+                if (amp_pos) {
+                    *amp_pos = '\0';
+                    trim_sted(cmd_copy); 
+                }
                 break;
             }
         }
+
+        if (args[0] == NULL) continue;
+
+        int pipe_idx = -1;
+        for (int i = 0; args[i] != NULL; i++) {
+            if (strcmp(args[i], "|") == 0) {
+                pipe_idx = i;
+                args[i] = NULL;
+                break;
+            }
+        }
+
+        if (pipe_idx != -1) {
+            char **cmd1_args = args;
+            char **cmd2_args = &args[pipe_idx + 1];
+
+            if (cmd1_args[0] == NULL || cmd2_args[0] == NULL) {
+                printf("Invalid pipe syntax\n");
+                continue;
+            }
+
+            int pipefd[2];
+            if (pipe(pipefd) == -1) {
+                perror("pipe");
+                continue;
+            }
+
+            pid_t pid1 = fork();
+            if (pid1 < 0) {
+                perror("fork");
+                continue;
+            }
+
+            if (pid1 == 0) {
+                close(pipefd[0]);
+                dup2(pipefd[1], STDOUT_FILENO);
+                close(pipefd[1]);
+
+                if (is_builtin_command(cmd1_args[0])) {
+                    execute_arg(cmd1_args[0], cmd1_args);
+                    exit(0);
+                } else {
+                    execvp(cmd1_args[0], cmd1_args);
+                    printf("%s cmd not found\n", cmd1_args[0]);
+                    exit(1);
+                }
+            }
+
+            pid_t pid2 = fork();
+            if (pid2 < 0) {
+                perror("fork");
+                continue;
+            }
+
+            if (pid2 == 0) {
+                close(pipefd[1]);
+                dup2(pipefd[0], STDIN_FILENO);
+                close(pipefd[0]);
+
+                if (is_builtin_command(cmd2_args[0])) {
+                    execute_arg(cmd2_args[0], cmd2_args);
+                    exit(0);
+                } else {
+                    execvp(cmd2_args[0], cmd2_args);
+                    printf("%s cmd not found\n", cmd2_args[0]);
+                    exit(1);
+                }
+            }
+
+            close(pipefd[0]);
+            close(pipefd[1]);
+
+            if (background) {
+                int assigned_job_id = -1;
+                for (int j = 0; j < MAX_JOBS; j++) {
+                    if (!jobs_list[j].active) {
+                        jobs_list[j].active = true;
+                        jobs_list[j].pid = pid2;
+                        strcpy(jobs_list[j].cmd, cmd_copy);
+                        assigned_job_id = j + 1;
+                        break;
+                    }
+                }
+                if (assigned_job_id != -1) {
+                    printf("[%d] %d\n", assigned_job_id, pid2);
+                } else {
+                    printf("Maximum number of background jobs reached.\n");
+                }
+            } else {
+                waitpid(pid1, NULL, 0);
+                waitpid(pid2, NULL, 0);
+            }
+            continue;
+        }
+
         char *cmd = args[0];
-        // command and arguments like gcc -o blah blah, gcc cmd rest goes in args
         bool redirect = false;
         bool append = false;
         char *redirect_file = NULL;
@@ -77,11 +180,10 @@ int main(int argc, char *argv[]) {
                 break;
             }
         }
-        if (cmd == NULL) continue;
+        
         args[0] = cmd;
-        char *arg = args[1];
-
         bool is_builtin = is_builtin_command(cmd);
+        
         if (background || !is_builtin) {
             pid_t pid = fork();
             if (pid < 0) {
@@ -90,14 +192,27 @@ int main(int argc, char *argv[]) {
             }
             if (pid > 0) {
                 if (background) {
-                    printf("[%d] %d\n", ++job_id, pid);
+                    int assigned_job_id = -1;
+                    for (int j = 0; j < MAX_JOBS; j++) {
+                        if (!jobs_list[j].active) {
+                            jobs_list[j].active = true;
+                            jobs_list[j].pid = pid;
+                            strcpy(jobs_list[j].cmd, cmd_copy);
+                            assigned_job_id = j + 1;
+                            break;
+                        }
+                    }
+                    if (assigned_job_id != -1) {
+                        printf("[%d] %d\n", assigned_job_id, pid);
+                    } else {
+                        printf("Maximum number of background jobs reached.\n");
+                    }
                 } else {
                     waitpid(pid, NULL, 0);
                 }
                 continue;
             }
         }
-
 
         int saved_stdout = dup(STDOUT_FILENO);
         if (redirect && redirect_file != NULL) {
@@ -117,7 +232,8 @@ int main(int argc, char *argv[]) {
             dup2(fd, STDOUT_FILENO);
             close(fd);
         }
-        if (strcmp(cmd, "exit")==0) {
+
+        if (strcmp(cmd, "exit") == 0) {
             if (redirect) {
                 fflush(stdout);
                 dup2(saved_stdout, STDOUT_FILENO);
@@ -125,14 +241,16 @@ int main(int argc, char *argv[]) {
             close(saved_stdout);
             break;
         }
-        else{
+        else {
             execute_arg(cmd, args);
         }
+        
         if (redirect) {
             fflush(stdout);
             dup2(saved_stdout, STDOUT_FILENO);
         }
         close(saved_stdout);
+        
         if (background) {
             exit(0);
         }
