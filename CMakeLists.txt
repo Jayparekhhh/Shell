@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(codecrafters-shell)
 
 file(GLOB_RECURSE SOURCE_FILES src/*.c src/*.h)
 
