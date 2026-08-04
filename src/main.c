@@ -42,6 +42,7 @@ int main(int argc, char *argv[]) {
             break;
         }
 
+
         trim(input); 
         input[strcspn(input, "\n")] = '\0';
         
@@ -68,98 +69,90 @@ int main(int argc, char *argv[]) {
 
         if (args[0] == NULL) continue;
 
-        int pipe_idx = -1;
+        char **cmds[50]; 
+        int cmd_count = 0;
+        cmds[cmd_count++] = &args[0];
+
         for (int i = 0; args[i] != NULL; i++) {
             if (strcmp(args[i], "|") == 0) {
-                pipe_idx = i;
-                args[i] = NULL;
-                break;
+                args[i] = NULL; 
+                cmds[cmd_count++] = &args[i + 1]; 
             }
         }
 
-        if (pipe_idx != -1) {
-            char **cmd1_args = args;
-            char **cmd2_args = &args[pipe_idx + 1];
-
-            if (cmd1_args[0] == NULL || cmd2_args[0] == NULL) {
-                printf("Invalid pipe syntax\n");
-                continue;
-            }
-
+        if (cmd_count > 1) {
+            int in_fd = STDIN_FILENO;
             int pipefd[2];
-            if (pipe(pipefd) == -1) {
-                perror("pipe");
-                continue;
-            }
+            pid_t pids[50];
+            pid_t last_pid = -1;
 
-            pid_t pid1 = fork();
-            if (pid1 < 0) {
-                perror("fork");
-                continue;
-            }
+            for (int i = 0; i < cmd_count; i++) {
+                if (cmds[i][0] == NULL) continue; 
 
-            if (pid1 == 0) {
-                close(pipefd[0]);
-                dup2(pipefd[1], STDOUT_FILENO);
-                close(pipefd[1]);
-
-                if (is_builtin_command(cmd1_args[0])) {
-                    execute_arg(cmd1_args[0], cmd1_args);
-                    exit(0);
-                } else {
-                    execvp(cmd1_args[0], cmd1_args);
-                    printf("%s cmd not found\n", cmd1_args[0]);
-                    exit(1);
+                if (i < cmd_count - 1) {
+                    if (pipe(pipefd) == -1) {
+                        perror("pipe");
+                        break;
+                    }
                 }
-            }
 
-            pid_t pid2 = fork();
-            if (pid2 < 0) {
-                perror("fork");
-                continue;
-            }
-
-            if (pid2 == 0) {
-                close(pipefd[1]);
-                dup2(pipefd[0], STDIN_FILENO);
-                close(pipefd[0]);
-
-                if (is_builtin_command(cmd2_args[0])) {
-                    execute_arg(cmd2_args[0], cmd2_args);
-                    exit(0);
-                } else {
-                    execvp(cmd2_args[0], cmd2_args);
-                    printf("%s cmd not found\n", cmd2_args[0]);
-                    exit(1);
+                pid_t pid = fork();
+                if (pid < 0) {
+                    perror("fork");
+                    break;
                 }
-            }
 
-            close(pipefd[0]);
-            close(pipefd[1]);
+                if (pid == 0) {
+                    if (in_fd != STDIN_FILENO) {
+                        dup2(in_fd, STDIN_FILENO);
+                        close(in_fd);
+                    }
+                    if (i < cmd_count - 1) {
+                        close(pipefd[0]);
+                        dup2(pipefd[1], STDOUT_FILENO);
+                        close(pipefd[1]);
+                    }
+
+                    if (is_builtin_command(cmds[i][0])) {
+                        execute_arg(cmds[i][0], cmds[i]);
+                        exit(0);
+                    } else {
+                        execvp(cmds[i][0], cmds[i]);
+                        printf("%s cmd not found\n", cmds[i][0]);
+                        exit(1);
+                    }
+                }
+
+                if (in_fd != STDIN_FILENO) {
+                    close(in_fd);
+                }
+                if (i < cmd_count - 1) {
+                    close(pipefd[1]); 
+                    in_fd = pipefd[0];
+                }
+                pids[i] = pid;
+                last_pid = pid;
+            }
 
             if (background) {
                 int assigned_job_id = -1;
                 for (int j = 0; j < MAX_JOBS; j++) {
                     if (!jobs_list[j].active) {
                         jobs_list[j].active = true;
-                        jobs_list[j].pid = pid2;
+                        jobs_list[j].pid = last_pid;
                         strcpy(jobs_list[j].cmd, cmd_copy);
                         assigned_job_id = j + 1;
                         break;
                     }
                 }
-                if (assigned_job_id != -1) {
-                    printf("[%d] %d\n", assigned_job_id, pid2);
-                } else {
-                    printf("Maximum number of background jobs reached.\n");
-                }
+                if (assigned_job_id != -1) printf("[%d] %d\n", assigned_job_id, last_pid);
             } else {
-                waitpid(pid1, NULL, 0);
-                waitpid(pid2, NULL, 0);
+                for (int i = 0; i < cmd_count; i++) {
+                    waitpid(pids[i], NULL, 0);
+                }
             }
             continue;
         }
-
         char *cmd = args[0];
         bool redirect = false;
         bool append = false;
@@ -204,8 +197,6 @@ int main(int argc, char *argv[]) {
                     }
                     if (assigned_job_id != -1) {
                         printf("[%d] %d\n", assigned_job_id, pid);
-                    } else {
-                        printf("Maximum number of background jobs reached.\n");
                     }
                 } else {
                     waitpid(pid, NULL, 0);
@@ -217,11 +208,7 @@ int main(int argc, char *argv[]) {
         int saved_stdout = dup(STDOUT_FILENO);
         if (redirect && redirect_file != NULL) {
             int flags = O_WRONLY | O_CREAT;
-            if (append) {
-                flags |= O_APPEND;
-            } else {
-                flags |= O_TRUNC;
-            }
+            if (append) flags |= O_APPEND; else flags |= O_TRUNC;
             int fd = open(redirect_file, flags, 0644);
             if (fd < 0) {
                 perror("open");
